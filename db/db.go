@@ -1,8 +1,12 @@
 package db
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"os"
+	"sort"
 	"sync"
 )
 
@@ -38,7 +42,7 @@ func transAction(a byte) Action {
 	case 'd':
 		return ActionDelete
 	default:
-		return ActionPut
+		return -1
 	}
 }
 
@@ -47,29 +51,57 @@ var (
 )
 
 type DB struct {
-	Dir   string
 	WAL   *WAL
 	Table *Table
 }
 
 type Table struct {
-	Map map[string][]byte
-	mu  sync.Mutex
+	Dir       string
+	MemTable  map[string][]byte
+	Immutable map[string][]byte
+
+	level int
+	mu    sync.Mutex
+}
+
+type KV struct {
+	Key []byte `json:"key"`
+	Val []byte `json:"val"`
+}
+
+type KVs []KV
+
+func (kvs KVs) Len() int {
+	return len(kvs)
+}
+func (kvs KVs) Less(i, j int) bool {
+	return kvs[i].less(kvs[j])
+}
+func (kvs KVs) Swap(i, j int) {
+	kvs[i], kvs[j] = kvs[j], kvs[i]
+}
+
+func (kv *KV) less(other KV) bool {
+	return string(kv.Key) < string(other.Key)
 }
 
 func (t *Table) Put(key []byte, val []byte) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.Map[string(key)] = val
+	t.MemTable[string(key)] = val
 	return nil
 }
 
 func (t *Table) Get(key []byte) ([]byte, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	val, ok := t.Map[string(key)]
+	val, ok := t.MemTable[string(key)]
 	if !ok {
-		return nil, ErrorKeyNotFound
+		val, ok = t.Immutable[string(key)]
+		if !ok {
+			return nil, ErrorKeyNotFound
+		}
+		return val, nil
 	}
 	return val, nil
 }
@@ -77,33 +109,67 @@ func (t *Table) Get(key []byte) ([]byte, error) {
 func (t *Table) Delete(key []byte) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	delete(t.Map, string(key))
+	delete(t.MemTable, string(key))
+	return nil
+}
+
+func (t *Table) writeSSTable() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	data := make([]KV, 0, len(t.Immutable))
+	for k, v := range t.Immutable {
+		data = append(data, KV{
+			Key: []byte(k),
+			Val: v,
+		})
+	}
+	sort.Sort(KVs(data))
+	f, err := os.Create(fmt.Sprintf("%s/%d.sst", t.Dir, t.level))
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	m := make(map[string]string)
+	for _, kv := range data {
+		m[string(kv.Key)] = string(kv.Val)
+	}
+	mData, _ := json.Marshal(m)
+	_, err = f.Write(mData)
+	if err != nil {
+		return err
+	}
+	t.level++
 	return nil
 }
 
 func newDefaultDB() *DB {
 	return &DB{
-		Dir:   ".",
-		WAL:   newWAL("."),
-		Table: &Table{Map: make(map[string][]byte)},
+		Table: &Table{
+			Dir:      ".",
+			MemTable: make(map[string][]byte),
+			level:    0,
+		},
+	}
+}
+
+func OptionDir(dir string) Option {
+	return func(db *DB) error {
+		db.Table.Dir = dir
+		return nil
 	}
 }
 
 type Option func(*DB) error
 
-func Open(options []Option) (*DB, error) {
+func Open(options ...Option) (*DB, error) {
 	db := newDefaultDB()
 	for _, option := range options {
-		option(db)
+		_ = option(db)
 	}
-	return db, nil
-}
 
-func OptionDir(dir string) Option {
-	return func(db *DB) error {
-		db.Dir = dir
-		return nil
-	}
+	db.WAL = newWAL(db.Table.Dir)
+	return db, nil
 }
 
 func (db *DB) Put(key []byte, val []byte) error {
@@ -137,10 +203,11 @@ func (db *DB) append(key []byte, val []byte, action Action) error {
 }
 
 func (db *DB) search(key []byte) ([]byte, error) {
-	if val, err := db.Table.Get(key); err == nil {
-		return val, nil
+	val, err := db.Table.Get(key)
+	if err != nil {
+		return nil, err
 	}
-	return nil, nil
+	return val, nil
 }
 
 func (db *DB) Close() error {
@@ -165,6 +232,23 @@ func (db *DB) sync() error {
 }
 
 func (db *DB) compact() error {
-	// TODO
+	if err := db.WAL.compact(); err != nil {
+		return err
+	}
+
+	if len(db.Table.Immutable) > 0 {
+		if err := db.writeSSTable(); err != nil {
+			return err
+		}
+	}
+	db.Table.Immutable = db.Table.MemTable
+	db.Table.MemTable = make(map[string][]byte)
+	return nil
+}
+
+func (db *DB) writeSSTable() error {
+	if err := db.Table.writeSSTable(); err != nil {
+		return err
+	}
 	return nil
 }

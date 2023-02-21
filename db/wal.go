@@ -97,13 +97,14 @@ func (w *WAL) compact() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.Records = make([]Record, 0)
-	w.f.Seek(0, 0)
-	w.f.Truncate(0)
-	return nil
+	if _, err := w.f.Seek(0, 0); err != nil {
+		return err
+	}
+	return w.f.Truncate(0)
 }
 
 func newWAL(dir string) *WAL {
-	f, err := os.OpenFile(dir+"/wal.txt", os.O_CREATE|os.O_RDWR, 0666)
+	f, err := os.OpenFile(dir+"/.wal", os.O_CREATE|os.O_RDWR, 0666)
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -39,7 +39,7 @@ func TestWAL(t *testing.T) {
 	}
 
 	// Test parseRecord function
-	data, err := os.ReadFile(filepath.Join(dir, "wal.txt"))
+	data, err := os.ReadFile(filepath.Join(dir, ".wal"))
 	if err != nil {
 		t.Fatalf("failed to read WAL file: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestWAL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Compact failed: %v", err)
 	}
-	data, err = os.ReadFile(filepath.Join(dir, "wal.txt"))
+	data, err = os.ReadFile(filepath.Join(dir, ".wal"))
 	if err != nil {
 		t.Fatalf("failed to read WAL file after compact: %v", err)
 	}
